@@ -1,0 +1,702 @@
+/****************************************************************
+*	作 者：demonxing202
+*	日 期：2025/01/17
+*	版 本：V1.0
+*	功 能：EH20PC加湿器
+*	M C U：			FT62FC67C  	TSSOP28		16MHz/2T
+*							----------------
+*				K3--------1|PA0			 PC7|28-------SEG5
+*				K4--------2|PA1		 	 PD5|27-------(-5V)
+*				NC--------3|PA2			 PC6|26-------CLK
+*				LED_VDD---4|PA3			 PC5|25-------DAT
+*				NTC-------5|PA4			 VDD|24-------GND
+*				SEG7------6|PA5		 	 PC2|23-------NC
+*				SEG6------7|PA6			 PC1|22-------NC
+*				BUZZ------8|PA7			 GND|21-------(-5V)
+*				NC--------9|PD0			 PC0|20-------ZERO
+*				K1-------10|PD1			 PB7|19-------NC
+*				K2-------11|PB0			 PB6|18-------NC
+*				NC-------12|PB1			 PB5|17-------TRG
+*				SEG2-----13|PB2			 PB4|16-------SEG4
+*				SEG1-----14|PB3			 PD4|15-------SEG3
+*							----------------
+*	具体功能：
+*	（1）开关机(开机读取上一次模式)
+*	（2）档位调节（需要记忆）
+*	（3）定时控制
+*	（4）氛围灯
+CopyRight(c)  2025 demonxing2024@163.com Copyright all is reserved
+****************************************************************/
+//===========================================================
+//	头文件
+//===========================================================
+#include	"SYSCFG.h"
+#include	"touch.h"
+#include	"led.h"
+#include	"uart.h"
+
+//===========================================================
+//	数据类型别名
+//===========================================================
+typedef unsigned char  u8_t;
+typedef unsigned short u16_t;
+typedef unsigned int   u32_t;
+
+//===========================================================
+//	宏定义
+//===========================================================
+#define Key1 	PD1
+#define Key2	PB0
+#define Key3	PA0
+#define Key4	PA1
+
+#define LED1	PB3		//开关
+#define LED2	PB2		//L
+#define LED3	PD4		//H
+#define BUZ		PA7		//BUZZER
+#define LED4	PB4		//1h
+#define LED5	PC7		//2h
+#define LED6	PA6		//4h
+#define LED7	PA5		//RGB氛围灯
+
+#define ZERO	PC0		//零点检测
+#define TRG		PB5		//控制加热盘
+#define NTC		PA4		//温度检测	AN22
+#define LED_VDD	PA3		//LED供电
+
+
+//===========================================================
+//	变量声明
+//===========================================================
+//标志
+bit Work_Status=0;		//开关
+bit Work_Mode=0;		//工作模式：低档位（默认）、高档位
+bit Times_On_Off=0;		//启动定时标志
+bit T0_1ms_Flag=0;		//1ms中断标志
+
+bit WorkMode_Flag=0;	//模式切换标志
+bit SetTimes_Flag=0;	//定时标志
+bit Flight_ON_OFF=0;	//氛围灯标志
+bit Hot_Work=0;			//加热盘工作标志
+bit Water_Flag=0;		//缺水标志
+
+unsigned char i;
+
+//状态
+volatile unsigned char KeyPressed=0;		//按下-释放
+volatile unsigned char TimeMode=0;		//定时模式切换  1-7h
+
+//计时
+volatile unsigned int T0_500ms_Counter=0;
+volatile unsigned int T0_1s_Counter=0;
+volatile unsigned int T0_3s_Counter=0;
+volatile unsigned int T0_5s_Counter=0;
+volatile unsigned int T0_1m_Counter=0;
+volatile unsigned int T0_1h_Counter=0;
+volatile unsigned int T0_2h_Counter=0;
+volatile unsigned int T0_4h_Counter=0;
+volatile unsigned int T0_nh_Counter=0;
+
+volatile unsigned int RunTimes_Counter=0;
+
+//计数
+volatile unsigned int Key1_Counter=0;
+volatile unsigned int Key2_Counter=0;
+volatile unsigned int Key3_Counter=0;
+volatile unsigned int Key4_Counter=0;
+
+
+//触摸
+unsigned char strongest = 0; //demo_test
+unsigned char Sav_strongest = 0; //demo_test
+unsigned long Sav_single,single;
+unsigned int uiSleepWaitTime;
+
+
+//===========================================================
+//	函数声明
+//===========================================================
+//延时函数
+void DelayUs(unsigned int Time);
+void DelayMs(unsigned char Time);
+
+//配置函数
+void SYS_INITIAL(void);
+void WDT_INITIAL(void);
+void TIMER0_INITINAL(void);
+
+//功能函数
+void Times_Control(unsigned int Times);	//定时时长设置
+
+
+//触摸函数
+void ConmunicateToPc(void);
+void TSC_Start_Debug(void);
+void SleepProcess_Real(void);
+void SleepProcess_Virtual(void);
+
+#ifndef TOUCH_DEBUG 
+#define TSC_Scan()  TSC_Start()
+#else
+#define TSC_Scan()  TSC_Start_Debug()
+#endif
+#if (!defined TOUCH_DEBUG ) && (defined _DEF_LOW_POWER)
+#define SleepProcess()	SleepProcess_Real()	
+#else
+#define SleepProcess()	SleepProcess_Virtual()	
+#endif
+
+
+
+//===========================================================
+//	函数实现
+//===========================================================
+/******************************************************************************
+* @函数名称：  DelayUs program
+* @函数功能：  延时函数
+* @函数参剩：  time
+* @笔    记：  None
+* @返 回 值：  void
+*****************************************************************************/
+void DelayUs(unsigned int Time)
+{    
+	unsigned int a;
+	for(a=0;a<Time;a++)
+	{
+		NOP();
+	}
+}
+/******************************************************************************
+* @函数名称：  DelayMs 
+* @函数功能：  短延时函数
+* @函数参剩：  time 延时时间长度 延时时长Time ms
+* @笔    记：  None
+* @返 回 值：  void
+*****************************************************************************/
+void DelayMs(unsigned char Time)
+{
+	unsigned char a,b;
+	for(a=0;a<Time;a++)
+	{
+		for(b=0;b<5;b++)
+		{
+		 	DelayUs(197); //快1%
+		}
+	}
+}
+/******************************************************************************
+* @函数名称：  interrupt ISR 
+* @函数功能：  中断入口函数 
+* @函数参剩：  void
+* @笔    记：  注意BANK的切换
+* @返 回 值：  void
+*****************************************************************************/
+
+void interrupt ISR(void) 
+{ 
+	if(T0IE && T0IF)
+    {
+		T0IF = 0;
+        TMR0 = 6;
+        T0_1ms_Flag=1;
+    }
+} 
+
+/******************************************************************************
+* @函数名称：  SYS_INITIAL
+* @函数功能：  系统时钟、IO初始化
+* @函数参剩：  void
+* @笔    记：  none
+* @返 回 值：  void
+*****************************************************************************/
+void SYS_INITIAL(void) 
+{
+	//1.时钟源   WDT  32KHZ  IRCF=110=16MHZ/4=4MHZ,0.25US/T 
+	OSCCON = SYS_OSCCON;//0B01110001;
+							
+    //2.分配匹配电路  Bit3 PSA   0= Timer0  1：WDT                       
+	OPTION = 0B00001000;	 
+							
+    
+    //为进入debug模式延时大于20ms
+	DelayMs(40); 			
+    //暂禁止所有中断
+    INTCON = 0;  			
+    
+	PORTA = 0;
+	PORTB = 0;
+    PORTD = 0;
+    PORTC = 0;
+    
+    TRISA = TRISA_CONFIG;		// 0-输出 1-输入  
+    TRISB = TRISB_CONFIG;
+    TRISC = TRISC_CONFIG; 	
+    TRISD = TRISD_CONFIG;	// TKCAP_PD5设为输入 
+    
+    //TKCAP_PD5_AN15设为模拟输入脚	
+    ANSEL1 = 0B10000000; 	
+    
+	BANKSEL4_7;
+    //PA端口上拉控制 1-开上拉 0-关上拉
+	WPUA = 0B00000000;     
+    WPUB = 0B00000000;
+	WPUC = 0B00000000;
+	WPUD = 0B00000000;
+    //PA端口上拉控制 1-开上拉 0-关上拉
+	WPDA = 0B00000000;     
+    WPDB = 0B00000000;
+	WPDC = 0B00000000;
+	WPDD = 0B00000000;   
+    BANKSEL0_3;		
+	
+    
+}
+
+
+/**************************************************
+*	函数名称：WDT_INITIAL
+*	函数功能：WDT初始化配置
+*	函数参数： void
+*	返 回 值:  void
+**************************************************/
+void WDT_INITIAL(void) 
+{
+	//清看门狗
+	CLRWDT();  
+    
+    //开始看门狗   			
+	WDTCON = 0B00001111;    //bit[6:5]WCKSRC=00=LIRC(32K) 
+							//bit[4:1]WDTPS=0110=1:4096,预分频1:1 定时时间=(4096*1)/32000=128ms  
+							//bit[0]SWDTEN= 1 开启                      	                  
+}
+
+
+/**************************************************
+*	函 数 名：TIMER0_INITINAL
+*	函数功能：Timer0初始化配置
+*	函数参数： void
+*	返 回 值:  void
+*	笔    记： (1/16MHz)*2T*预分频*TMR0				
+*				定时周期：（1/16）*2*32 = 4us
+*				定时时长：定时周期*计数次数
+*				4us * 250 = 1000us =1ms
+**************************************************/
+void TIMER0_INITINAL(void)
+{
+	//1.分频电路匹配给TIMER0   PS=111=1:256  PS=100=32
+	OPTION = 0B00000100; 
+    
+	//2.选择时钟源
+	T0CON0 = 0B00000000;
+   
+	//3.清除标志位、计数器清零
+	TMR0 = 6;
+    
+    //4.开始定时器0
+    T0IF = 0;
+    T0ON =1;  
+}
+
+
+/**************************************************
+*	函 数 名：BUZZER_RUNNING
+*	函数功能：蜂鸣器配置
+*	函数参数： void
+*	返 回 值:  void
+*	笔    记： none
+//功能函数  90ms  230ms  500ms
+//125us * 8 = 1ms 
+**************************************************/
+void BUZZER_RUNNING(unsigned int nms)
+{
+	unsigned int i;
+	for(i=0;i<nms;i++)
+    {
+		BUZ=1;
+		DelayUs(63);
+		BUZ=0;
+		DelayUs(62);
+    }
+}
+/**************************************************
+*	函 数 名: BUZZER_1s
+*	函数功能：蜂鸣器配置
+*	函数参数： void
+*	返 回 值:  void
+*	笔    记： 1s  500ms开  500ms关  三声
+**************************************************/
+void BUZZER_1s(void)
+{
+	BUZ=1;
+	DelayMs(250);DelayMs(250);
+	BUZ=0;
+	DelayMs(250);DelayMs(250);
+}
+
+/**************************************************
+*	函数名称：Times_Control
+*	函数功能：定时控制
+*	函数参数：Times  定时时长 以秒为单位
+*	返 回 值:  void
+*	笔    记：
+//1h=60min=3600s  2h=120min=7200s  4h=240min=14400s
+//测试 10s              20s               40s
+//测试 1min             2min              4min
+**************************************************/
+void Times_Control(unsigned int Times)	
+{
+	if(T0_1s_Counter<1000)T0_1s_Counter++;	//1s=1000ms
+    else if(T0_1s_Counter==1000)
+    {
+		T0_1s_Counter=0;
+        if(RunTimes_Counter<Times)RunTimes_Counter++;
+        else if(RunTimes_Counter==Times)
+        {
+			RunTimes_Counter=0;
+            //定时结束，关闭设备
+            SetTimes_Flag=0;
+            Work_Status=0;
+            BUZZER_RUNNING(360);
+        }
+    }
+}
+
+void main(void )
+{
+	//系统时钟、IO初始化
+    SYS_INITIAL();
+
+    //touch库资源使用详情请看touch.h说明
+    TSC_INITIAL();//触摸按键初始化
+    
+    //低功耗定时，请勿关闭 
+	WDT_INITIAL(); //看门狗初始化
+    
+    //timer0初始化
+    TIMER0_INITINAL();
+    
+    ADC_INITINAL();
+    
+    PEIE = 1;  	//使能外设中断
+	GIE = 1;  	//使能全局中断
+	T0IE = 1;	//使能Timer0
+    
+    //初次上电bi-bi (共90ms)
+	BUZZER_RUNNING(360);
+    LED_VDD=1;		//氛围灯初始化为关闭状态
+    
+
+	while(1)
+	{
+		  //清看门狗   
+		  CLRWDT();  
+      if(T0_1ms_Flag)
+     {
+        T0_1ms_Flag=0;
+			 //按键扫描
+			 TSC_Scan(); 
+        
+			 //按键处理  //返回1表示所有按键处理完成一次,请和TSC_Scan一起使用,否则影响扫描速度?
+			if(TSC_DataProcessing()== 1) 
+			{
+				strongest = TSC_GetCsKey();
+				single = TSC_GetLocalKey(); 
+				
+				//没有按键按下
+				if(single==0)
+				{
+					KeyPressed=0;
+				}
+			/*———————————————————— 按键1按下-开关 开-关 ——————————————————————*/
+				else if(strongest==1)
+				{
+					//待机状态按下-开机
+					if(Work_Status==0)
+					{
+						T0_3s_Counter++;
+            //长按3s开机
+						if(T0_3s_Counter>=150)
+						{
+							T0_3s_Counter=0;
+							Work_Status=1;				
+							LED2=1;LED3=0;
+               BUZZER_RUNNING(360);		//90ms
+						}
+             //小于3s  bi-bi
+						else if(T0_3s_Counter<150)		//BUG :按下就会一直响 松开不响
+						{
+							//====================================
+							//bi-bi提示
+							//BUZZER_RUNNING(90);//90ms
+							//BUZZER_RUNNING(90);//90ms
+							//====================================
+						}
+					}
+					//单击关机
+					else if(Work_Status==1)
+					{
+						T0_500ms_Counter++;
+						if(T0_500ms_Counter>20 && T0_500ms_Counter<=100)
+						{
+							T0_500ms_Counter=0;
+							Work_Status=0;			//关机
+							BUZZER_RUNNING(360);	//90ms
+							
+							LED1=0;
+							LED2=0;LED3=0;
+							LED4=0;LED5=0;LED6=0;
+							LED7=0;
+                            
+              Hot_Work=0; //发热盘不工作
+              LED_VDD=1;	//氛围灯不工作
+                            
+                            
+              //Key2_Counter=0; 	//模式存储在内存
+             Key3_Counter=0; 	//定时重置为0
+						}
+					}
+				}
+            
+        /*———————————————————— 按键2按下-模式 低-高 ——————————————————————*/
+				else if(strongest==2)
+				{
+					if(KeyPressed==0)
+					{	
+						KeyPressed=1;
+						if(Work_Status)
+						{
+							Key2_Counter++;
+							BUZZER_RUNNING(360);//90ms
+							if(Key2_Counter>1)
+							{
+								Key2_Counter=0; 
+							}
+							switch(Key2_Counter)
+							{
+								case 0: 	
+									WorkMode_Flag=1;Work_Mode=0;
+									LED2=1;LED3=0;
+                  //=======================================
+                  //低档位  P=UI=(U^2)/R=150W   ≥200ml/h
+                                    
+                                    
+                                    
+                  //=======================================
+									break;
+							    case 1:		
+									WorkMode_Flag=1;Work_Mode=1;
+									LED2=0;LED3=1;
+                  //=======================================
+                  //高档位  P=UI=(U^2)/R=280W   ≥300ml/h
+                                    
+                                    
+                                    
+                   //=======================================
+                   break;
+							}
+						}
+					}
+				}
+            /*———————————————————— 按键3按下-定时 1h-7h ——————————————————————*/
+				else if(strongest==3)
+				{
+					if(KeyPressed==0)
+					{	
+						KeyPressed=1;
+                        
+              if(Work_Status)
+              {
+  							Key3_Counter++;
+                T0_1s_Counter=0;	//切换定时时，重置计数
+  							BUZZER_RUNNING(360);//90ms
+  							if(Key3_Counter>7)
+							  {
+								  Key3_Counter=0; 
+							  }
+								
+						switch(Key3_Counter)
+						{
+							case 0:			//熄灭
+								SetTimes_Flag=0;TimeMode=0;
+								LED4=0;LED5=0;LED6=0;
+								break; 
+							case 1:			//1h
+								SetTimes_Flag=1;TimeMode=1;
+								LED4=1;LED5=0;LED6=0;
+								break; 
+							case 2:			//2h
+								SetTimes_Flag=1;TimeMode=2;
+								LED4=0;LED5=1;LED6=0;
+								break; 
+							case 3:			//3h
+								SetTimes_Flag=1;TimeMode=3;
+								LED4=1;LED5=1;LED6=0;
+								break; 
+							case 4:			//4h 
+								SetTimes_Flag=1;TimeMode=4;
+								LED4=0;LED5=0;LED6=1;
+								break; 
+							case 5:			//5h
+								SetTimes_Flag=1;TimeMode=5;
+								LED4=1;LED5=0;LED6=1;
+								break; 
+							case 6:			//6h
+								SetTimes_Flag=1;TimeMode=6;
+								LED4=0;LED5=1;LED6=1;
+								break; 
+							case 7:			//7h  
+								SetTimes_Flag=1;TimeMode=7;
+								LED4=1;LED5=1;LED6=1;
+								break;     
+							}
+            }
+					}
+				}
+            /*———————————————————— 按键4按下-氛围 开-关 ——————————————————————*/
+				else if(strongest==4)
+				{
+					if(KeyPressed==0)
+					{	
+						KeyPressed=1;
+						if(Work_Status)
+						{
+							Flight_ON_OFF=~Flight_ON_OFF;
+							BUZZER_RUNNING(360);//90ms
+							if(Flight_ON_OFF==1)
+							{
+								//======================
+								//氛围灯工作
+                                LED7=1;
+                                LED_VDD=0;
+								//=======================
+							}
+							else
+							{
+                //======================
+								//关闭氛围灯
+                 LED7=0;
+                 LED_VDD=1;
+                 //======================
+							}
+						}
+					}
+				 } 
+				//睡眠处理函数需放置在if(TSC_DataProcessing()== 1)里面			
+				//SleepProcess();						
+			}
+
+			//===============================================================================//	
+				if(Work_Status)
+				{
+					if(T0_5s_Counter<5000)T0_5s_Counter++;
+					else if(T0_5s_Counter==5000)
+                    {
+						T0_5s_Counter=0;
+                        /*———————————————————— 发热盘工作 ——————————————————————*/
+						Hot_Work=1; //发热盘工作标志
+                    }
+				}
+            
+            
+            /*———————————————————— 定时 处理 ——————————————————————*/
+				if(SetTimes_Flag)
+				{
+					switch(TimeMode)
+					{
+						case 0:Times_Control(0);break;			//不计时
+						case 1:Times_Control(3600);break;		//1h=60min=3600s
+						case 2:Times_Control(7200);break;		//2h=120min=7200s
+						case 3:Times_Control(10800);break;		//3h=180min=10800s
+						case 4:Times_Control(14400);break;		//4h=240min=14400s
+						case 5:Times_Control(18000);break;		//5h=300min=18000s
+						case 6:Times_Control(21600);break;		//6h=360min=21600s
+						case 7:Times_Control(25200);break;		//7h=420min=25200s
+					}
+					if(SetTimes_Flag==0)
+					{
+						//定时结束，关闭设备
+						LED1=0;
+						LED2=0;LED3=0;
+						LED4=0;LED5=0;LED6=0;
+						LED7=0;
+                        BUZZER_RUNNING(360);
+                        Key3_Counter=0;	//重置
+                        //TimeMode=0;		//重置
+						Work_Status=0;	//关闭
+					}
+				}   
+    }//T0_1ms_Flag             
+	}//while             
+}//main
+/******************************************************************************
+  * @brief  SleepProcess	program
+  * @Description 低功耗处理函数，若未选择低功耗功能，SleepProcess() 在实际工程中可以删除，
+  *	虽然已通过宏裁剪，但是函数也会编译占用4byte rom和 占用cpu执行时间。
+  * bSleepEnable用于使能低功耗功能，如程序满足休眠条件之后，请将bSleepEnable置1；
+  * @param  None
+  * @note   
+  * @retval  None
+  *****************************************************************************
+*/
+#ifndef TOUCH_DEBUG
+#ifdef _DEF_LOW_POWER
+void SleepProcess_Real(void)
+{
+	/*例：允许休眠就置位 bSleepEnable */
+//	if(PB7 == 0) 
+//    {
+		bSleepEnable = 1;     
+//    }
+	if(single == 0)		//single为localkey的值，等于0表示没有任何按键按下
+	{
+		uiSleepWaitTime++;
+		if(uiSleepWaitTime > uiSLEEP_MODE_WAIT_NUMBER)
+		{
+			uiSleepWaitTime = uiSLEEP_MODE_WAIT_NUMBER;
+			if(bSleepEnable)
+			{
+				//若使能了定时器等外设，请在此处关闭外设使能和相应中断使能，并清除对应中断标志
+				while(1)
+				{
+					CLRWDT(); 
+/*					//如休眠时判断其它外部条件唤醒，按照此例实现。注意一定放在 TSC_SleepPrcoessing()前                            
+					if(PB7 == 1)
+					{
+						bSleepEnable = 0;  
+					}  
+*/					
+					TSC_SleepPrcoessing(); 
+					if(bSleepEnable == 0)
+					{
+						uiSleepWaitTime = 0;
+                        //在此处重新打开进入低功耗前关闭的外设
+						break;
+					}                       
+				}
+			}
+		}
+	}
+	else
+	{
+		uiSleepWaitTime = 0;
+	} 
+
+}
+#endif
+#endif
+void SleepProcess_Virtual(void)
+{
+}
+/******************************************************************************
+  * @brief  TSC_Scan program
+  * @Description 请勿删除此函数
+  * @param  None
+  * @note   
+  * @retval  None
+  *****************************************************************************
+*/
+void TSC_Start_Debug(void)
+{
+    TSC_Start_Test();
+    ConmunicateToPc(); 
+}
